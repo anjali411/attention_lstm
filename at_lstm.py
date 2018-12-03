@@ -15,7 +15,8 @@ import torch.optim as optim
 
 def pad_array(X, filename):
 	vocab = pickle.load(open(filename, 'rb'))
-	pad_token = vocab['<PAD>']	
+	pad_token = vocab['<PAD>']
+	print(pad_token)	
 	#print(len(vocab))
 	X = [[vocab[word] for word in sent] for sent in X]
 
@@ -38,13 +39,13 @@ def form_input_data():
 	input = pickle.load(open('train_input.pkl', 'rb'))
 	
 	input_size = len(input)
-	Y = np.zeros((input_size, 3))
+	Y = np.zeros(input_size)
 	X, aspect = [], []
 
 	for i, item in enumerate(input):
 		X.append(item[0])
 		aspect.append(item[1])
-		Y[i][item[2]]=1 # yi = [neutral, pos, neg]
+		Y[i]=item[2]+1 # yi = [neg,neutral, pos]
 
 	X, X_lengths, p_idx_sent = pad_array(X, "train_data_word2idx.pkl")
 	aspect, aspect_lengths, p_idx_aspect = pad_array(aspect, "train_data_aspect2idx.pkl")
@@ -61,7 +62,7 @@ def form_input_data():
 class atae_LSTM(nn.Module):
 	# num_embeddings - train data word dict len
 	# taking aspect_embedding_dim = word_embedding_dim
-	def __init__(self, w2vfile, a2vfile, num_class, max_sent_len, dropout_prob, p_idx_sent, p_idx_aspect, batch_size):
+	def __init__(self, max_sent_len=79, dropout_prob=0.01, p_idx_sent=4435, p_idx_aspect=1310, batch_size=25, w2vfile="word_vec.dat", a2vfile="aspect_vec.dat", num_class=3):
 		super(atae_LSTM, self).__init__()
 		self.batch_size = batch_size
 		self.p_idx_sent = p_idx_sent
@@ -124,22 +125,26 @@ class atae_LSTM(nn.Module):
 
 		output, (hidden, memory) = self.lstm(embedded)	
 		output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=True) # output: (batch, seq_len, hidden_size)
-
+		#print("output.shape, hidden.shape, _.shape", output.shape, hidden.shape, _.shape)
+	
 		return output, hidden, asp_emb
 
 	#aspect - aspect embeddings
 	def output_gen(self, H, aspect, hidden, X_lengths):
-		print(H.shape, self.max_sent_len * self.batch_size * self.embedding_dim)
-		M_1 = self.attn1(H).view(self.max_sent_len, self.batch_size, self.embedding_dim)	# M_1: (N, batch, hidden_size)
+		batch_max_sent_len = H.shape[1]
+
+		# print(H.shape, self.max_sent_len * self.batch_size * self.embedding_dim)
+		
+		M_1 = self.attn1(H).view(batch_max_sent_len, self.batch_size, self.embedding_dim)	# M_1: (N, batch, hidden_size)
 		# print(M_1.shape)
 		aspect = aspect.view(self.batch_size,1,-1)	# aspect: (batch, 1, hidden_size)
 
 		M_2_cell = self.attn2(aspect)	# M_2_cell: (batch, 1, hidden_size)
 		M_2 = M_2_cell.view(self.batch_size, self.embedding_dim) # M_2_cell: (batch, hidden_size)
-		M_2 = M_2.expand(self.max_sent_len, self.batch_size, self.embedding_dim) # M_2: (N, batch, hidden_size)
+		M_2 = M_2.expand(batch_max_sent_len, self.batch_size, self.embedding_dim) # M_2: (N, batch, hidden_size)
 
 		for i in range(self.batch_size):
-			for j in range(X_lengths[i],self.max_sent_len):
+			for j in range(X_lengths[i],batch_max_sent_len):
 				M_2[j][i] = torch.zeros(self.embedding_dim)					
 		
 		#M_1 ->Nxbxd, M_2->Nxbxd
@@ -173,9 +178,9 @@ def train(X, X_lengths, aspect, aspect_lengths, target_tensor, lstm_, optimizer,
 	output, hidden, asp_emb = lstm_.forward(X, X_lengths, aspect, aspect_lengths)
 	output_ = lstm_.output_gen(output, asp_emb, hidden, X_lengths)
 
-	# loss += criterion(output_, target_tensor)
-	# loss.backward()
-	# optimizer.step()
+	loss += criterion(output_, target_tensor)
+	loss.backward()
+	optimizer.step()
 	return loss
 
 def trainIters(n_iters, batch_size, print_every=100, learning_rate=0.01):
@@ -184,7 +189,7 @@ def trainIters(n_iters, batch_size, print_every=100, learning_rate=0.01):
 	lstm_ = atae_LSTM(w2vfile="word_vec.dat", a2vfile="aspect_vec.dat", num_class=3, max_sent_len=int(X_lengths[0]), dropout_prob=0.01, p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size=25)
 	X, X_lengths, aspect, aspect_lengths = np.asarray(X, dtype=int), np.asarray(X_lengths, dtype=int), np.asarray(aspect, dtype=int), np.asarray(aspect_lengths, dtype=int)
 	X, X_lengths, aspect, aspect_lengths = torch.from_numpy(X), torch.from_numpy(X_lengths), torch.from_numpy(aspect), torch.from_numpy(aspect_lengths)
-	Y = torch.from_numpy(Y).float()
+	Y = torch.from_numpy(Y).long()	
 	
 	loss_total = 0  # Reset every print_every
 	optimizer = optim.Adagrad(lstm_.parameters(), lr=learning_rate, weight_decay=0.001)
@@ -192,8 +197,25 @@ def trainIters(n_iters, batch_size, print_every=100, learning_rate=0.01):
 
 	for i in range(n_iters):
 		for j in range(0, 26, batch_size): #X.shape[0]
+			print(i,j)
 			if(j+25<X.shape[0]):
 				loss_total += train(X[j:j+batch_size], X_lengths[j:j+batch_size], aspect[j:j+25], aspect_lengths[j:j+25], Y[j:j+25], lstm_, optimizer, criterion)
+		print(i,loss_total)
 
+	torch.save(lstm_.state_dict(), "model_checkpoint.pth")	
+
+def eval():
+	model = atae_LSTM()
+	model.load_state_dict(torch.load("model_checkpoint.pth"))
+	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input_data()
+	X, X_lengths, aspect, aspect_lengths = np.asarray(X, dtype=int), np.asarray(X_lengths, dtype=int), np.asarray(aspect, dtype=int), np.asarray(aspect_lengths, dtype=int)
+	X, X_lengths, aspect, aspect_lengths = torch.from_numpy(X), torch.from_numpy(X_lengths), torch.from_numpy(aspect), torch.from_numpy(aspect_lengths)
+	with torch.no_grad():
+		for j in range(0, 26, 25): #X.shape[0]
+			if(j+25<X.shape[0]):
+				output, hidden, asp_emb = model.forward(X[j:j+25], X_lengths[j:j+25], aspect[j:j+25], aspect_lengths[j:j+25])
+				output_ = model.output_gen(output, asp_emb, hidden, X_lengths)				
+				print(output_, Y[j:j+25])
 if __name__ == "__main__":
-	trainIters(n_iters=5, batch_size=25)
+	#trainIters(n_iters=2, batch_size=25)
+	eval()
