@@ -4,14 +4,17 @@ import numpy as np
 import unicodedata
 import string
 import random
-import bcolz
+# import bcolz
 import pickle
+import sys
 
 import torch
 import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 import torch.optim as optim		
+
+use_cuda = torch.cuda.is_available()
 
 def pad_array(X, filename):
 	vocab = pickle.load(open(filename, 'rb'))
@@ -35,8 +38,8 @@ def pad_array(X, filename):
 
 	return padded_X, X_lengths, pad_token
 
-def form_input_data():
-	input = pickle.load(open('train_input.pkl', 'rb'))
+def form_input(filename):
+	input = pickle.load(open(filename, 'rb'))
 	
 	input_size = len(input)
 	Y = np.zeros(input_size)
@@ -47,8 +50,8 @@ def form_input_data():
 		aspect.append(item[1])
 		Y[i]=item[2]+1 # yi = [neg,neutral, pos]
 
-	X, X_lengths, p_idx_sent = pad_array(X, "train_data_word2idx.pkl")
-	aspect, aspect_lengths, p_idx_aspect = pad_array(aspect, "train_data_aspect2idx.pkl")
+	X, X_lengths, p_idx_sent = pad_array(X, "50_train_data_word2idx.pkl")
+	aspect, aspect_lengths, p_idx_aspect = pad_array(aspect, "50_train_data_aspect2idx.pkl")
 
 	arridx = X_lengths.argsort()
 	X = X[arridx[::-1]]
@@ -62,7 +65,7 @@ def form_input_data():
 class atae_LSTM(nn.Module):
 	# num_embeddings - train data word dict len
 	# taking aspect_embedding_dim = word_embedding_dim
-	def __init__(self, max_sent_len=79, dropout_prob=0.01, p_idx_sent=4435, p_idx_aspect=1310, batch_size=25, w2vfile="word_vec.dat", a2vfile="aspect_vec.dat", num_class=3):
+	def __init__(self,p_idx_sent, p_idx_aspect, max_sent_len=79, dropout_prob = 0.01, batch_size=8, w2vfile="50_word_vec.pkl", a2vfile="50_aspect_vec.pkl", num_class=3):
 		super(atae_LSTM, self).__init__()
 		self.batch_size = batch_size
 		self.p_idx_sent = p_idx_sent
@@ -87,9 +90,20 @@ class atae_LSTM(nn.Module):
 		self.lin_out = nn.Linear(self.embedding_dim, self.num_class, bias=True)
 		self.softmax_ = nn.Softmax(dim=2)
 
+		if use_cuda:
+			self.lstm.cuda()
+			self.attn1.cuda()
+			self.attn2.cuda()
+			self.attn.cuda()
+			self.sent_rep1.cuda()
+			self.sent_rep2.cuda()
+			self.lin_out.cuda()
+
 	def create_embed_layer(self, trainable = True):
-		w2v = torch.from_numpy(bcolz.open(self.w2vfile)[:])
-		a2v = torch.from_numpy(bcolz.open(self.a2vfile)[:])
+		# w2v = torch.from_numpy(bcolz.open(self.w2vfile)[:])
+		# a2v = torch.from_numpy(bcolz.open(self.a2vfile)[:])
+		w2v = torch.from_numpy(pickle.load(open(self.w2vfile, 'rb'))).cuda()
+		a2v = torch.from_numpy(pickle.load(open(self.a2vfile, 'rb'))).cuda()
 
 		self.num_embeddings = w2v.shape[0]
 		self.num_aspect_embed = a2v.shape[0]
@@ -111,17 +125,17 @@ class atae_LSTM(nn.Module):
 		asp_emb = torch.sum(asp_emb, dim=1)
 		
 		asp_lens = aspect_lengths.tolist()
-
+		print(asp_emb.shape, self.batch_size)
 		for i in range(self.batch_size):
 			asp_emb[i] = asp_emb[i]/asp_lens[i]
 
-		embedded = torch.zeros(self.batch_size, self.max_sent_len, 2*self.embedding_dim)		
+		embedded = torch.zeros(self.batch_size, self.max_sent_len, 2*self.embedding_dim).cuda()		
 		for i in range(self.batch_size):
 			for j in range(X_lengths[i]):
 				embedded[i][j] = torch.cat([word_emb[i][j],asp_emb[i]])
 		
+		embedded = self.dropout(embedded)
 		embedded = nn.utils.rnn.pack_padded_sequence(embedded, X_lengths, batch_first=True)
-		# embedded = self.dropout(embedded)
 
 		output, (hidden, memory) = self.lstm(embedded)	
 		output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=True) # output: (batch, seq_len, hidden_size)
@@ -154,7 +168,7 @@ class atae_LSTM(nn.Module):
 		#print(attn_weights.shape)
 		H = H.permute(0,2,1)	#bxdxN
 		#print(H.shape)
-		sent_rep = torch.zeros(self.batch_size, self.embedding_dim, 1)	#bxdx1
+		sent_rep = torch.zeros(self.batch_size, self.embedding_dim, 1).cuda()	#bxdx1
 		#print(sent_rep.shape)
 		for i in range(self.batch_size):
 			sent_rep[i] = torch.mm(H[i],attn_weights[i])
@@ -183,39 +197,73 @@ def train(X, X_lengths, aspect, aspect_lengths, target_tensor, lstm_, optimizer,
 	optimizer.step()
 	return loss
 
-def trainIters(n_iters, batch_size, print_every=100, learning_rate=0.01):
-    
-	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input_data()
-	lstm_ = atae_LSTM(w2vfile="word_vec.dat", a2vfile="aspect_vec.dat", num_class=3, max_sent_len=int(X_lengths[0]), dropout_prob=0.01, p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size=25)
+def trainIters(n_iters, batch_size, learning_rate=0.01):
+	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input('train_input.pkl')
+	lstm_ = atae_LSTM(w2vfile="50_word_vec.pkl", a2vfile="50_aspect_vec.pkl", num_class=3, max_sent_len=int(X_lengths[0]), dropout_prob=0.01, p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size=batch_size)
 	X, X_lengths, aspect, aspect_lengths = np.asarray(X, dtype=int), np.asarray(X_lengths, dtype=int), np.asarray(aspect, dtype=int), np.asarray(aspect_lengths, dtype=int)
 	X, X_lengths, aspect, aspect_lengths = torch.from_numpy(X), torch.from_numpy(X_lengths), torch.from_numpy(aspect), torch.from_numpy(aspect_lengths)
 	Y = torch.from_numpy(Y).long()	
 	
+	lstm_.cuda()
 	loss_total = 0  # Reset every print_every
 	optimizer = optim.Adagrad(lstm_.parameters(), lr=learning_rate, weight_decay=0.001)
 	criterion = nn.CrossEntropyLoss()
 
+#	if use_cuda:
+#		lstm_.cuda()
+#		X.cuda()
+#		X_lengths.cuda()
+#		aspect.cuda()
+#		aspect_lengths.cuda()
+#		Y.cuda()
+
 	for i in range(n_iters):
-		for j in range(0, 26, batch_size): #X.shape[0]
+		for j in range(0, X.shape[0], batch_size):
 			print(i,j)
-			if(j+25<X.shape[0]):
-				loss_total += train(X[j:j+batch_size], X_lengths[j:j+batch_size], aspect[j:j+25], aspect_lengths[j:j+25], Y[j:j+25], lstm_, optimizer, criterion)
+			if(j+batch_size<X.shape[0]):
+				loss_total += train(X[j:j+batch_size].cuda(), X_lengths[j:j+batch_size].cuda(), aspect[j:j+batch_size].cuda(), aspect_lengths[j:j+batch_size].cuda(), Y[j:j+batch_size].cuda(), lstm_, optimizer, criterion.cuda())
 		print(i,loss_total)
-
-	torch.save(lstm_.state_dict(), "model_checkpoint.pth")	
-
-def eval():
-	model = atae_LSTM()
+		print(i,loss_total)	
+		if(i%50 == 0):
+			print(i)	
+			torch.save(lstm_.state_dict(), str(i)+"_model_checkpoint.pth")	
+	torch.save(lstm_.state_dict(), "_model_checkpoint.pth")
+def eval(batch_size):
+	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input('test_input.pkl')
+	print(X.shape, p_idx_sent, p_idx_aspect)
+	model = atae_LSTM(p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size = batch_size).cuda()
 	model.load_state_dict(torch.load("model_checkpoint.pth"))
-	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input_data()
 	X, X_lengths, aspect, aspect_lengths = np.asarray(X, dtype=int), np.asarray(X_lengths, dtype=int), np.asarray(aspect, dtype=int), np.asarray(aspect_lengths, dtype=int)
 	X, X_lengths, aspect, aspect_lengths = torch.from_numpy(X), torch.from_numpy(X_lengths), torch.from_numpy(aspect), torch.from_numpy(aspect_lengths)
+
+#	if use_cuda:
+#		lstm_.cuda()
+#		X.cuda()
+#		X_lengths.cuda()
+#		aspect.cuda()	
+#		aspect_lengths.cuda()
+	confusion_matrix=np.zeros((3,3))
+	correct = 0
+	total = 0
 	with torch.no_grad():
-		for j in range(0, 26, 25): #X.shape[0]
-			if(j+25<X.shape[0]):
-				output, hidden, asp_emb = model.forward(X[j:j+25], X_lengths[j:j+25], aspect[j:j+25], aspect_lengths[j:j+25])
-				output_ = model.output_gen(output, asp_emb, hidden, X_lengths)				
-				print(output_, Y[j:j+25])
+		for j in range(0, X.shape[0], batch_size):
+			if(j+batch_size<X.shape[0]):
+				total+=batch_size
+				output, hidden, asp_emb = model.forward(X[j:j+batch_size].cuda(), X_lengths[j:j+batch_size].cuda(), aspect[j:j+batch_size].cuda(), aspect_lengths[j:j+batch_size].cuda())
+				output_ = model.output_gen(output, asp_emb, hidden, X_lengths[j:j+batch_size].cuda())				
+				
+				for i in range(batch_size):
+					out_ = int(output_[i].max(0)[1])
+					target_out = int(Y[i+j])
+					confusion_matrix[target_out][out_]+=1
+					if(out_ == target_out):
+						correct+=1
+
+		print("Accuracy: ", correct/total)
+		print(confusion_matrix)
+
 if __name__ == "__main__":
-	#trainIters(n_iters=2, batch_size=25)
-	eval()
+	if(sys.argv[1] =="train"):
+		trainIters(n_iters=200, batch_size=8)
+	elif(sys.argv[1] =="test"):
+		eval(batch_size=8)
