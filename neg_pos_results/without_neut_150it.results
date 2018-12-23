@@ -1,0 +1,7 @@
+Batch size:  16
+X.shape:  (1134, 70) padding index sent:  4436 padding index aspect:  1311
+[[105.   0. 104.]
+ [ 43.   0. 152.]
+ [ 83.   0. 633.]]
+accuracy:  0.7978378378378378
+Neg examples: 210 Neutral examples: 196 Positive Examples: 728

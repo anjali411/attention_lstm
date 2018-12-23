@@ -1,3 +1,6 @@
+#python3 at_lstm.py <train/test>
+#Requires one argument- train/test
+
 from __future__ import unicode_literals, print_function, division
 from io import open
 import numpy as np
@@ -19,11 +22,12 @@ use_cuda = torch.cuda.is_available()
 def pad_array(X, filename):
 	vocab = pickle.load(open(filename, 'rb'))
 	pad_token = vocab['<PAD>']
-	print(pad_token)	
+	#print(pad_token)	
 	#print(len(vocab))
 	X = [[vocab[word] for word in sent] for sent in X]
 
 	inp_size = len(X)
+
 	X_lengths = np.ones(inp_size)
 	for i in range(inp_size):
 		X_lengths[i] = len(X[i])
@@ -65,7 +69,7 @@ def form_input(filename):
 class atae_LSTM(nn.Module):
 	# num_embeddings - train data word dict len
 	# taking aspect_embedding_dim = word_embedding_dim
-	def __init__(self,p_idx_sent, p_idx_aspect, max_sent_len=79, dropout_prob = 0.01, batch_size=8, w2vfile="50_word_vec.pkl", a2vfile="50_aspect_vec.pkl", num_class=3):
+	def __init__(self,p_idx_sent, p_idx_aspect, max_sent_len=79, dropout_prob = 0.01, batch_size=16, w2vfile="50_word_vec.pkl", a2vfile="50_aspect_vec.pkl", num_class=3):
 		super(atae_LSTM, self).__init__()
 		self.batch_size = batch_size
 		self.p_idx_sent = p_idx_sent
@@ -125,7 +129,7 @@ class atae_LSTM(nn.Module):
 		asp_emb = torch.sum(asp_emb, dim=1)
 		
 		asp_lens = aspect_lengths.tolist()
-		print(asp_emb.shape, self.batch_size)
+		#print(asp_emb.shape, self.batch_size)
 		for i in range(self.batch_size):
 			asp_emb[i] = asp_emb[i]/asp_lens[i]
 
@@ -197,9 +201,11 @@ def train(X, X_lengths, aspect, aspect_lengths, target_tensor, lstm_, optimizer,
 	optimizer.step()
 	return loss
 
-def trainIters(n_iters, batch_size, learning_rate=0.01):
-	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input('train_input.pkl')
+def trainIters(n_iters, batch_size, learning_rate=0.01,exists=False):
+	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input('neut_neg_pos_train_input.pkl')
 	lstm_ = atae_LSTM(w2vfile="50_word_vec.pkl", a2vfile="50_aspect_vec.pkl", num_class=3, max_sent_len=int(X_lengths[0]), dropout_prob=0.01, p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size=batch_size)
+	if(exists):
+		lstm_.load_state_dict(torch.load("_model_checkpoint.pth"))
 	X, X_lengths, aspect, aspect_lengths = np.asarray(X, dtype=int), np.asarray(X_lengths, dtype=int), np.asarray(aspect, dtype=int), np.asarray(aspect_lengths, dtype=int)
 	X, X_lengths, aspect, aspect_lengths = torch.from_numpy(X), torch.from_numpy(X_lengths), torch.from_numpy(aspect), torch.from_numpy(aspect_lengths)
 	Y = torch.from_numpy(Y).long()	
@@ -222,48 +228,59 @@ def trainIters(n_iters, batch_size, learning_rate=0.01):
 			print(i,j)
 			if(j+batch_size<X.shape[0]):
 				loss_total += train(X[j:j+batch_size].cuda(), X_lengths[j:j+batch_size].cuda(), aspect[j:j+batch_size].cuda(), aspect_lengths[j:j+batch_size].cuda(), Y[j:j+batch_size].cuda(), lstm_, optimizer, criterion.cuda())
-		print(i,loss_total)
+#print(i,loss_total)
 		print(i,loss_total)	
 		if(i%50 == 0):
 			print(i)	
 			torch.save(lstm_.state_dict(), str(i)+"_model_checkpoint.pth")	
 	torch.save(lstm_.state_dict(), "_model_checkpoint.pth")
+
 def eval(batch_size):
+	print("Batch size: ", batch_size)
 	X, X_lengths, p_idx_sent, aspect, aspect_lengths, p_idx_aspect, Y = form_input('test_input.pkl')
-	print(X.shape, p_idx_sent, p_idx_aspect)
-	model = atae_LSTM(p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size = batch_size).cuda()
-	model.load_state_dict(torch.load("model_checkpoint.pth"))
+	print("X.shape: ", X.shape,"padding index sent: ", p_idx_sent, "padding index aspect: ", p_idx_aspect)
+	model = atae_LSTM(p_idx_sent=p_idx_sent, p_idx_aspect=p_idx_aspect, batch_size=batch_size).cuda()
+	model.load_state_dict(torch.load("_model_checkpoint.pth"))
 	X, X_lengths, aspect, aspect_lengths = np.asarray(X, dtype=int), np.asarray(X_lengths, dtype=int), np.asarray(aspect, dtype=int), np.asarray(aspect_lengths, dtype=int)
 	X, X_lengths, aspect, aspect_lengths = torch.from_numpy(X), torch.from_numpy(X_lengths), torch.from_numpy(aspect), torch.from_numpy(aspect_lengths)
-
-#	if use_cuda:
-#		lstm_.cuda()
-#		X.cuda()
-#		X_lengths.cuda()
-#		aspect.cuda()	
-#		aspect_lengths.cuda()
+	Y=torch.from_numpy(Y)
 	confusion_matrix=np.zeros((3,3))
-	correct = 0
-	total = 0
 	with torch.no_grad():
 		for j in range(0, X.shape[0], batch_size):
 			if(j+batch_size<X.shape[0]):
-				total+=batch_size
 				output, hidden, asp_emb = model.forward(X[j:j+batch_size].cuda(), X_lengths[j:j+batch_size].cuda(), aspect[j:j+batch_size].cuda(), aspect_lengths[j:j+batch_size].cuda())
 				output_ = model.output_gen(output, asp_emb, hidden, X_lengths[j:j+batch_size].cuda())				
 				
 				for i in range(batch_size):
 					out_ = int(output_[i].max(0)[1])
-					target_out = int(Y[i+j])
+					target_out = int(Y[j+i])
+					#print(type(out_),type(target_out))
+					#print(out_,Y[i])
 					confusion_matrix[target_out][out_]+=1
-					if(out_ == target_out):
-						correct+=1
-
-		print("Accuracy: ", correct/total)
 		print(confusion_matrix)
+		num = confusion_matrix[0][0]+confusion_matrix[1][1]+confusion_matrix[2][2]
+		denom = num + confusion_matrix[0][1] + confusion_matrix[1][0] + confusion_matrix[1][2]+confusion_matrix[2][1]
+		print("accuracy: ",num/denom)
+		neg, neutral, pos=0,0,0
+		for i in range(X.shape[0]):
+			val = int(Y[i])
+			if(val == 0):
+				neg+=1
+			elif(val ==1):
+				neutral+=1
+			else:
+			 	pos+=1
+		print("Neg examples:", neg,"Neutral examples:", neutral, "Positive Examples:", pos)
+
+#150 epochs, batch size 16
 
 if __name__ == "__main__":
 	if(sys.argv[1] =="train"):
-		trainIters(n_iters=200, batch_size=8)
+		for i in range(3):
+			exists=True
+			print("ith run of 50 iterations:", i)
+			if(i==0):
+				exists=False
+			trainIters(n_iters=50, batch_size=16,exists=exists)
 	elif(sys.argv[1] =="test"):
-		eval(batch_size=8)
+		eval(batch_size=16)
