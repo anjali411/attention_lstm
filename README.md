@@ -1,2 +1,1 @@
-starting attention based lstm project code 
-I CAN, I WILL
+python3 at_lstm.py <train/test>
